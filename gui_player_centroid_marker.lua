@@ -11,7 +11,7 @@ function widget:GetInfo()
   }
 end
 
---TODO: 
+--TODO:
 ----alpha foreground -- DONE, test
 ----avoid large jumps in position -- DONE, configurize
 ----ignore buildings
