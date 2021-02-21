@@ -222,16 +222,6 @@ function widget:ViewResize(vsx, vsy)
 	screenHeight = vsy
 end
 
-
-
--- helper function
-local function Contains(t, item)
-  for k, v in pairs(t) do
-    if v == item then return true end
-  end
-  return false
-end
-
 local width_icon_clan = 18
 local width_icon_country = 18
 local width_icon_rank = 18
