@@ -1,14 +1,14 @@
 function widget:GetInfo()
-  return {
-    name      = "Player Centroid Marker",
-    desc      = "v0002 Centroid Marker shows information about groups of units on the screen.",
-    author    = "Pxtl",
-    date      = "2020-02-20",
-    license   = "GNU GPL, v2 or later",
-    layer     = -20,
-    experimental = true,
-    enabled   = true,
-  }
+	return {
+		name      = "Player Centroid Marker",
+		desc      = "v0002 Centroid Marker shows information about groups of units on the screen.",
+		author    = "Pxtl",
+		date      = "2020-02-20",
+		license   = "GNU GPL, v2 or later",
+		layer     = -20,
+		experimental = true,
+		enabled   = true,
+	}
 end
 
 --TODO:
@@ -18,13 +18,17 @@ end
 ----filter out spectators --done, test
 ----don't show resource bar on gaia --done, test.
 
-local echo = Spring.Echo
-local abs = math.abs
+-- list of marker windows, index should match the teamID
 local markerWindows = {}
+
 local screen0
 local screenHeight, screenWidth = 0,0
-local timer = 0
+local intervalTimer = 0 --time since last slow-update
 
+local abs 						= math.abs
+local sqrt 						= math.sqrt
+
+local echo 						= Spring.Echo
 local spGetCameraPosition    	= Spring.GetCameraPosition
 local spGetMouseState 			= Spring.GetMouseState
 local spGetTeamList				= Spring.GetTeamList
@@ -40,7 +44,6 @@ local spGetVisibleUnits      	= Spring.GetVisibleUnits
 local spIsUnitInView 			= Spring.IsUnitInView
 local spWorldToScreenCoords 	= Spring.WorldToScreenCoords
 local spGetUnitVelocity			= Spring.GetUnitVelocity
-local sqrt = math.sqrt
 
 local function Distance3D(x1, y1, z1, x2, y2, z2)
 	return sqrt((x2-x1) * (x2-x1) + (y2-y1) * (y2-y1) + (z2-z1) * (z2-z1))
@@ -412,7 +415,7 @@ local function UpdateWindowPosition(window, dt)
 		-- PID controller logic here
 		local pidP, pidI, pidD = options.pidP.value, options.pidI.value, options.pidD.value
 
-		local projectedX, projectedY, projectedZ = AddScalarMultipliedVec3(timer,
+		local projectedX, projectedY, projectedZ = AddScalarMultipliedVec3(intervalTimer,
 			window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ,
 			window.pcm_centroidVelX, window.pcm_centroidVelY, window.pcm_centroidVelZ
 		)
@@ -652,11 +655,11 @@ end
 -- update window-position as often as possible, but the unit-list doesn't need to be updated that frequently.
 
 function widget:Update(dt)
-	timer = timer + dt
+	intervalTimer = intervalTimer + dt
 	local doCalculations = false
-	if timer > options.updateInterval.value then
+	if intervalTimer > options.updateInterval.value then
 		doCalculations = true
-		timer = 0
+		intervalTimer = 0
 	end
 
 	local localTeamID = spGetLocalTeamID()
