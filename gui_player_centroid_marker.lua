@@ -79,7 +79,7 @@ local function ReInitialize()
 end
 
 options_path = 'Settings/Interface/Player Centroid Marker'
-options_order = {'showLocalPlayer', 'updateFrequency', 'backgroundOpacity', 'nameOpacity', 'CCROpacity', 'resourceBarOpacity', 'radarDotWeight', 'text_height', 'pidP', 'pidI', 'pidD'}
+options_order = {'showLocalPlayer', 'updateInterval', 'backgroundOpacity', 'nameOpacity', 'CCROpacity', 'resourceBarOpacity', 'radarDotWeight', 'text_height', 'pidP', 'pidI', 'pidD'}
 options = {
 	showLocalPlayer = {
 		name = "Show local player's own marker",
@@ -89,18 +89,20 @@ options = {
 		OnChange = function() ReInitialize() end,
 		advanced = false
 	},
-	updateFrequency = {
-		name = "Update Frequency (seconds)",
+	updateInterval = {
+		name = "Update Interval (seconds)",
 		type = "number",
 		value = 0.5, min = 0.1, max = 4.0, step = 0.1,
-		desc = "Show the marker for the current player.",
+		desc = "Higher update frequency has performance costs because the widget must examine every unit on the screen. " ..
+		"0.5 seconds is recommended for modern PCs, go higher on older machines",
 		OnChange = function() ReInitialize() end,
 		advanced = false
 	},
 	backgroundOpacity = {
 		name = "Background Opacity",
 		type = "number",
-		value = 0.3, min = 0, max = 1, step = 0.05,
+		value = 0.5, min = 0, max = 1, step = 0.05,
+		desc = "Show a black box behind the marker - 0 is hidden, 1 is solid",
 		OnChange = function() ReInitialize() end,
 		advanced = false
 	},
@@ -115,7 +117,7 @@ options = {
 	CCROpacity = {
 		name = "Clan/Country/Rank Opacity",
 		type = "number",
-		value = 0.75, min = 0, max = 1, step =0.05,
+		value = 1, min = 0, max = 1, step =0.05,
 		desc = "Show the clan, country, and rank icons - 0 is hidden, 1 is solid",
 		OnChange = function() ReInitialize() end,
 		advanced = false
@@ -123,7 +125,7 @@ options = {
 	resourceBarOpacity = {
 		name = "Stat bar opacity",
 		type = "number",
-		value = 0.0, min = 0, max = 1, step =0.05,
+		value = 0.5, min = 0, max = 1, step =0.05,
 		desc = "Display resource statistics: metal and energy - 0 is hidden, 1 is solid",
 		OnChange = function() ReInitialize() end,
 		advanced = false
@@ -175,6 +177,18 @@ options = {
 		advanced = true
 	}
 }
+
+-- how much less should immobile units weigh than mobiles for determine how much
+-- the marker likes them?
+local immobileUnitWeightMultiplier = 0.0625
+-- how much less should incomplete units weigh vs complete ones, before
+-- factoring in their completion level?
+local incompleteUnitWeightMultiplier = 0.25
+-- how long (in seconds) should a marker window take to fade in/out?
+local fadeTime = 0.25
+-- how far (in elmos) is too far for the marker window to slide, after which it
+-- should fade out and reappear there?
+local markerWindowJumpLimit = 500
 
 function widget:Initialize()
 	Chili = WG.Chili
@@ -247,7 +261,6 @@ local function MakeNewIcon(window, o)
 end
 
 local function CreateWindow(teamID)
-	echo ("CreateWindow teamID: " .. tostring(teamID)) --DEBUG
 	local text_height = options.text_height.value
 
 	local window = Chili.Window:New{
@@ -268,8 +281,11 @@ local function CreateWindow(teamID)
 		savespace = false
 	}
 	window.borderColor[4] = 0
-	window.pcm_fade = 1 --1 is fully faded.
-	window.pcm_fading_direction = 0
+
+	--0 is fully faded, 1 is opaque.
+	window.pcm_opacity = 0
+	-- 1 is becoming opaque, -1 is fading
+	window.pcm_opacity_transition = 0
 	window.pcm_labels = {}
 	window.pcm_bars = {}
 	window.pcm_images = {}
@@ -292,10 +308,12 @@ local function CreateWindow(teamID)
 		end
 	end
 
-	-- a team (which is a single "player" in Spring with multiple co-op humans controlling it)
-	-- so can have multiple human players so we'll have to synthesize some things from their info.
+	-- a team (which is a single "player" in Spring with multiple co-op humans
+	-- controlling it) so can have multiple human players so we're going to
+	-- write one row in the marker per-player
 	for i = 1, #playerList do
 		local currentX = 0
+		local currentY = (i-1) * text_height
 		local playerID = playerList[i]
 		local teamcolor = teamID and {Spring.GetTeamColor(teamID)} or {1,1,1,1}
 		local playerName = nil
@@ -311,9 +329,7 @@ local function CreateWindow(teamID)
 			local name,active,spectator,teamID,allyTeamID,pingTime,cpuUsage,country,rank,customKeys = Spring.GetPlayerInfo(playerID)
 			playerName = name
 
-			local icClan = nil
-			local icRank = nil
-			local icCountry = nil
+			local icClan, icRank, icCountry = nil,nil,nil
 			if options.CCROpacity.value > 0 then
 				icCountry = (country and country ~= '' and ("LuaUI/Images/flags/" .. country ..".png"))
 				icRank = ("LuaUI/Images/LobbyRanks/" .. (customKeys.icon or "0_0") .. ".png")
@@ -325,15 +341,15 @@ local function CreateWindow(teamID)
 				end
 
 				if icCountry then
-					MakeNewIcon(window,{x=currentX, y = (i-1) * text_height, file=icCountry,})
+					MakeNewIcon(window,{x=currentX, y = currentY, file=icCountry,})
 					currentX = currentX + width_icon_country
 				end
 				if icRank then
-					MakeNewIcon(window,{x=currentX, y = (i-1) * text_height, file=icRank,})
+					MakeNewIcon(window,{x=currentX, y = currentY, file=icRank,})
 					currentX = currentX + width_icon_rank
 				end
 				if icClan then
-					MakeNewIcon(window,{x=currentX, y = (i-1) * text_height, file=icClan,})
+					MakeNewIcon(window,{x=currentX, y = currentY, file=icClan,})
 					currentX = currentX + width_icon_clan
 				end
 		    end
@@ -341,66 +357,63 @@ local function CreateWindow(teamID)
 			playerName = "noname"
 		end
 
-		window.pcm_nameLabel = Chili.Label:New{
+		table.insert(window.pcm_labels, Chili.Label:New{
 			x = currentX,
 			y = (i-1) * text_height,
 			parent = window,
 			caption = playerName,
 			fontsize = text_height,
 			textColor = teamcolor,
-		}
+		})
 	end
+
+	-- put the shared storage bars *below* the list of player within the shared-comm-team
+	local currentY = #playerList * text_height
 
 	if options.resourceBarOpacity.value > 0 and not isGaia then
 		local _, eStorage = spGetTeamResources(teamID, "energy")
 		local _, mStorage = spGetTeamResources(teamID, "metal")
 		local barWidth = 48
 
+		-- create storage bars, start with dummy values we'll get proper values later
+		-- could be nil if we don't have access to this info eg enemy team
 		if eStorage ~= nil then
-			window.pcm_m_bar = MakeNewBar(window, {x=0, y= i * text_height + 2, width=barWidth,color = {.7,.75,.9,1},value = 1,}) 
+			window.pcm_m_bar = MakeNewBar(window, {x=0, y=currentY+4, width=barWidth,color = {.7,.75,.9,1},value = 1,})
 		end
 		if mStorage ~= nil then
-			window.pcm_e_bar = MakeNewBar(window, {x=barWidth + 2, y= i * text_height + 2, width=barWidth,color = {1,1,0,1},value = 1,}) 
+			window.pcm_e_bar = MakeNewBar(window, {x=barWidth + 2, y=currentY+4, width=barWidth,color = {1,1,0,1},value = 1,}) 
 		end
 	end
 
 	return window
 end
 
+-- check if numeric value is not a number by testing if it's equal to itself
 local function IsNan(num)
 	return num ~= num
 end
 
 local function UpdateWindowPosition(window, dt)
-	if window and not Contains(markerWindows, window) then
-		echo("ERROR: UpdateWindowPosition assertion failed.")
-	end
-
 	--show marker if it's been hidden and shouldshow is true
 	if window.pcm_shouldShow and not window:IsDescendantOf(screen0) then
 		screen0:AddChild(window)
-		echo ("SHOW " .. window.name)
 
 		-- initialize all values
-		window.pcm_fade = 1
-		window.pcm_fading_direction = -1
-
-
+		window.pcm_opacity = 0
+		window.pcm_opacity_transition = 1
 		window.pcm_velX, window.pcm_velY, window.pcm_velZ = 0,0,0
-
 		window.pcm_integralX, window.pcm_integralY, window.pcm_integralZ = 0,0,0
 
 		window.pcm_posX, window.pcm_posY, window.pcm_posZ =
 			window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ
-
 	end
 
 	--hide window shouldshow is false
-	if not window.pcm_shouldShow and window and window.pcm_fade == 0 then
-		echo ("HIDE " .. window.name)
-		window.pcm_fading_direction = 1
+	if not window.pcm_shouldShow and window.pcm_opacity == 1 then
+		window.pcm_opacity_transition = -1
 	end
 
+	-- we don't want to apply acceleration once window is fading
 	if window.pcm_shouldShow then
 		-- Centroid interpolation here - 30 frames per second
 		window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ =
@@ -419,7 +432,7 @@ local function UpdateWindowPosition(window, dt)
 		local deltaZ = projectedZ - window.pcm_posZ
 
 		-- avoid large jumps and just fade-transition.
-		if abs(deltaX) + abs(deltaY) + abs(deltaZ) > 500 then --TODO: parametrize me
+		if abs(deltaX) + abs(deltaY) + abs(deltaZ) > markerWindowJumpLimit then
 			window.pcm_shouldShow = false
 		end
 
@@ -432,43 +445,41 @@ local function UpdateWindowPosition(window, dt)
 		window.pcm_velX = window.pcm_velX + dt * (pidP * deltaX + pidI * window.pcm_integralX - pidD * (window.pcm_velX - window.pcm_centroidVelX))
 		window.pcm_velY = window.pcm_velY + dt * (pidP * deltaY + pidI * window.pcm_integralY - pidD * (window.pcm_velY - window.pcm_centroidVelY))
 		window.pcm_velZ = window.pcm_velZ + dt * (pidP * deltaZ + pidI * window.pcm_integralZ - pidD * (window.pcm_velZ - window.pcm_centroidVelZ))
-
-		-- apply velocity to position
-		window.pcm_posX = window.pcm_posX + dt * window.pcm_velX
-		window.pcm_posY = window.pcm_posY + dt * window.pcm_velY
-		window.pcm_posZ = window.pcm_posZ + dt * window.pcm_velZ
-
-		-- debug mode, no PID:
-		-- window.pcm_posX = window.pcm_centroidPosX + window.pcm_centroidVelX * timer -- window.pcm_posY + dt * window.pcm_velX
-		-- window.pcm_posY = window.pcm_centroidPosY + window.pcm_centroidVelY * timer -- window.pcm_posY + dt * window.pcm_velY
-		-- window.pcm_posZ = window.pcm_centroidPosZ + window.pcm_centroidVelZ * timer -- window.pcm_posZ + dt * window.pcm_velZ
 	end
+
+	-- apply velocity to position
+	window.pcm_posX = window.pcm_posX + dt * window.pcm_velX
+	window.pcm_posY = window.pcm_posY + dt * window.pcm_velY
+	window.pcm_posZ = window.pcm_posZ + dt * window.pcm_velZ
+
+	-- debug mode, no PID:
+	-- window.pcm_posX = window.pcm_centroidPosX + window.pcm_centroidVelX * timer -- window.pcm_posY + dt * window.pcm_velX
+	-- window.pcm_posY = window.pcm_centroidPosY + window.pcm_centroidVelY * timer -- window.pcm_posY + dt * window.pcm_velY
+	-- window.pcm_posZ = window.pcm_centroidPosZ + window.pcm_centroidVelZ * timer -- window.pcm_posZ + dt * window.pcm_velZ
 
 	-- apply positional update
 	local sx, sy, sz = spWorldToScreenCoords(window.pcm_posX , window.pcm_posY, window.pcm_posZ)
 
-	-- check if out-of-bounds, if so remove window immediately - can re-fade-it-in after.
+	-- check if it's far-out-of-bounds, if so remove window immediately - can re-fade-it-in after.
 	local winPosX = sx - window.width/2
 	local winPosY = screenHeight - sy - options.vertical_offset.value - window.height
 	if (winPosX == nil or winPosY == nil
-		or IsNan(winPosX) or IsNan(winPosY) --this probably shouldn't happen...
-		or (winPosX > screenWidth - window.width)
-		or (winPosY > screenHeight - window.width)
-		or (winPosX < 0)
-		or (winPosY < 0)
+		--NaN probably shouldn't happen, but occurred in a bug and crashed the
+		--widget so keeping the check here defensively
+		or IsNan(winPosX) or IsNan(winPosY)
+		or (winPosX > screenWidth)
+		or (winPosY > screenHeight)
+		or (winPosX < 0 - window.width)
+		or (winPosY < 0 - window.height)
 	) then
-		window.pcm_fading_direction = 1 --fade it out.
-	else
-		window:SetPos(winPosX, winPosY)
+		window.pcm_shouldshow = false --fade it out.
 	end
+	window:SetPos(winPosX, winPosY)
 end
 
-local immobileUnitWeightMultiplier = 0.0625
-local incompleteUnitWeightMultiplier = 0.25
-local fadeTime = 0.25
-
 -- the storage value from Spring can't be used raw
-local function AdjustStorage(storage)
+-- have to do some cleaning
+local function CleanStorage(storage)
 	if storage then
 		storage = storage - 10000 -- storage has a "hidden 10k" to account for
 
@@ -486,8 +497,8 @@ local function GetPlayerTeamStats(teamID)
 	local mCurrent, mStorage, mPull, mIncome, mExpe, mShar, mSent, mReci = spGetTeamResources(teamID, "metal")
 
 	local stats = {}
-	stats.eStorage = AdjustStorage(eStorage)
-	stats.mStorage = AdjustStorage(mStorage)
+	stats.eStorage = CleanStorage(eStorage)
+	stats.mStorage = CleanStorage(mStorage)
 
 	-- Default these to 1 if the value is nil for some reason.
 	-- These should never be 1 in normal play, so if you see
@@ -508,33 +519,34 @@ local function UpdatePlayerTeamStats(window,stats)
 	if window.pcm_e_bar then window.pcm_e_bar:SetValue(stats.eCurrent/stats.eStorage) end
 end
 
-local function UpdateFade(window)
-	-- apply current fade-level to all widgets
+local function UpdateFadeTransition(window)
+	-- apply current opacity-level to all widgets
 	local backgroundOpacity = options.backgroundOpacity.value
-	local newBackgroundOpacity = backgroundOpacity - backgroundOpacity * window.pcm_fade
+	local newBackgroundOpacity = backgroundOpacity * window.pcm_opacity
 
-	local nameOpacity = options.nameOpacity.value * (1 - window.pcm_fade)
-	local CCROpacity = options.CCROpacity.value * (1 - window.pcm_fade)
-	local resourceBarOpacity = options.resourceBarOpacity.value * (1 - window.pcm_fade)
+	local nameOpacity = options.nameOpacity.value * window.pcm_opacity
+	local CCROpacity = options.CCROpacity.value * window.pcm_opacity
+	local resourceBarOpacity = options.resourceBarOpacity.value * window.pcm_opacity
 
 	window.color[4] = newBackgroundOpacity
 	window.borderColor[4] = newBackgroundOpacity
 
-	for j=1, #window.pcm_bars do
-		local bar = window.pcm_bars[j]
+	for i=1, #window.pcm_bars do
+		local bar = window.pcm_bars[i]
 		bar.backgroundColor[4] = resourceBarOpacity
 		bar.color[4] = resourceBarOpacity
 		bar:SetColor(bar.color)
 	end
 
-	if(window.pcm_nameLabel) then -- this should never not exist yet somehow it did once and crashed.
-		window.pcm_nameLabel.font.color[4] = nameOpacity
-		window.pcm_nameLabel.font.outlineColor[4] = nameOpacity
-		window.pcm_nameLabel:Invalidate()
+	for i=1, #window.pcm_labels do
+		local label = window.pcm_labels[i]
+		label.font.color[4] = nameOpacity
+		label.font.outlineColor[4] = nameOpacity
+		label:Invalidate()
 	end
 
-	for j=1, #window.pcm_images do
-		local image = window.pcm_images[j]
+	for i=1, #window.pcm_images do
+		local image = window.pcm_images[i]
 		image.color[4] = CCROpacity
 		image:Invalidate()
 	end
@@ -652,7 +664,7 @@ end
 function widget:Update(dt)
 	timer = timer + dt
 	local doCalculations = false
-	if timer > options.updateFrequency.value then
+	if timer > options.updateInterval.value then
 		doCalculations = true
 		timer = 0
 	end
@@ -680,19 +692,19 @@ function widget:Update(dt)
 				UpdateWindowPosition(window, dt)
 			end
 
-			if window and window.pcm_fading_direction ~= 0 then
+			if window and window.pcm_opacity_transition ~= 0 then
 				-- Fade the window according to its current fade-level
-				UpdateFade(window)
+				UpdateFadeTransition(window)
 
 				-- update fade-level
-				window.pcm_fade = window.pcm_fade + dt / fadeTime * window.pcm_fading_direction
-				if window.pcm_fade >= 1 then
-					window.pcm_fade = 1
+				window.pcm_opacity = window.pcm_opacity + dt / fadeTime * window.pcm_opacity_transition
+				if window.pcm_opacity >= 1 then
+					window.pcm_opacity = 1
+					window.pcm_opacity_transition = 0
+				elseif window.pcm_opacity <= 0 then
+					window.pcm_opacity = 0
 					screen0:RemoveChild(window)
-					window.pcm_fading_direction = 0
-				elseif window.pcm_fade <= 0 then
-					window.pcm_fade = 0
-					window.pcm_fading_direction = 0
+					window.pcm_opacity_transition = 0
 				end
 			end
 		end
