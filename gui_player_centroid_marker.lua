@@ -257,7 +257,7 @@ end
 
 -- Create the marker window
 -- aborts and returns nil if no players exist on team
--- this often happens in single-player at the begginning
+-- this often happens in single-player at the beginning
 -- even with the PlayerChanged listener
 local function TryCreateMarkerWindow(teamID)
 	--first let's get information about the player
