@@ -1,7 +1,7 @@
 function widget:GetInfo()
 	return {
 		name      = "Player Centroid Marker",
-		desc      = "v0002 Centroid Marker shows information about groups of units on the screen.",
+		desc      = "v0003 Centroid Marker shows player information over their units.",
 		author    = "Pxtl",
 		date      = "2020-02-20",
 		license   = "GNU GPL, v2 or later",
@@ -12,22 +12,15 @@ function widget:GetInfo()
 end
 
 --TODO:
-----BUG: why is window not appearing if created at startup?  It only appears if created *after*.
 ----Find out about new version of Chili?
-----Hide on mouseover
-----filter out spectators --done, test
-----don't show resource bar on gaia --done, test.
 
 -- list of marker windows, index should match the teamID
 local markerWindows = {}
-
 local screen0
 local screenHeight, screenWidth = 0,0
 local intervalTimer = 0 --time since last slow-update
 
-local abs 						= math.abs
 local sqrt 						= math.sqrt
-
 local echo 						= Spring.Echo
 local spGetCameraPosition    	= Spring.GetCameraPosition
 local spGetMouseState 			= Spring.GetMouseState
@@ -54,19 +47,12 @@ local function Distance2D(x1, y1, x2, y2)
 		(y2-y1) * (y2-y1))
 end
 
-local function ScalarMultiplyVec3(multiple, x, y, z)
-	return x * multiple, y * multiple, z * multiple
-end
-
 local function AddVec3(x1, y1, z1, x2, y2, z2)
 	return x1 + x2, y1 + y2, z1 + z2
 end
 
-local function AddScalarMultipliedVec3(scalarMultiple, x, y, z, scaledx, scaledy, scaledz)
-	x = x + (scaledx or 0) * scalarMultiple
-	y = y + (scaledy or 0) * scalarMultiple
-	z = z + (scaledz or 0) * scalarMultiple
-	return x, y, z
+local function ScalarMultVec3(scalarMultiple, x, y, z)
+	return scalarMultiple * x, scalarMultiple * y, scalarMultiple * z
 end
 
 local function DestroyWindows()
@@ -82,7 +68,7 @@ local function ReInitialize()
 end
 
 options_path = 'Settings/Interface/Player Centroid Marker'
-options_order = {'showLocalPlayer', 'updateInterval', 'backgroundOpacity', 'nameOpacity', 'CCROpacity', 'resourceBarOpacity', 'radarDotWeight', 'text_height', 'pidP', 'pidI', 'pidD'}
+options_order = {'showLocalPlayer', 'updateInterval', 'mouseoverHideDistance', 'backgroundOpacity', 'nameOpacity', 'CCROpacity', 'resourceBarOpacity', 'radarDotWeight', 'text_height', 'pidP', 'pidI', 'pidD'}
 options = {
 	showLocalPlayer = {
 		name = "Show local player's own marker",
@@ -98,6 +84,14 @@ options = {
 		value = 0.5, min = 0.1, max = 4.0, step = 0.1,
 		desc = "Higher update frequency has performance costs because the widget must examine every unit on the screen. " ..
 		"0.5 seconds is recommended for modern PCs, go higher on older machines",
+		OnChange = function() ReInitialize() end,
+		advanced = false
+	},
+	mouseoverHideDistance = {
+		name = "Mouseover Hide Distance (screen units)",
+		type = "number",
+		value = 75, min = 0, max = 100, step = 5,
+		desc = "Hide the marker when the mouse is this close to the marker.  0 means neverhide",
 		OnChange = function() ReInitialize() end,
 		advanced = false
 	},
@@ -152,8 +146,9 @@ options = {
 	vertical_offset = {
 		name = "Marker vertical offset",
 		type = "number",
-		value = 64, min = 1, max = 500, step = 1,
-		desc = "How high, in pixels, should the marker be above the centre of the player's units.",
+		value = 64,
+		min = 1, max = 500, step = 1,
+		desc = "How high, in screen units, should the marker be above the centre of the player's units.",
 		OnChange = function() ReInitialize() end,
 		advanced = true
 	},
@@ -175,12 +170,22 @@ options = {
 		name = 'PID controller Derivative term (0-40)',
 		type = 'number',
 		value = 10,
-		min=0,max=50
-		,step=2,
+		min=0,max=50,step=2,
 		advanced = true
 	}
 }
 
+-- enum for describing current marker window state.
+local windowStateEnum = {
+	-- window is invisible and detached from screen
+	Hidden = 0,
+	-- window is invisible but calculations are starting but no previous location exists
+	New = 1,
+	-- window is invisible but calculations have entered normal flow
+	Resolving = 2,
+	-- window is visible
+	Ready = 3
+}
 -- how much less should immobile units weigh than mobiles for determine how much
 -- the marker likes them?
 local immobileUnitWeightMultiplier = 0.0625
@@ -188,10 +193,10 @@ local immobileUnitWeightMultiplier = 0.0625
 -- factoring in their completion level?
 local incompleteUnitWeightMultiplier = 0.25
 -- how long (in seconds) should a marker window take to fade in/out?
-local fadeTime = 0.25
+local fadeTime = 0.5
 -- how far (in elmos) is too far for the marker window to slide, after which it
 -- should fade out and reappear there?
-local markerWindowJumpLimit = 500
+local markerWindowJumpLimit = 300
 -- how wide are resource bars
 local resourceBarWidth = 48
 
@@ -245,7 +250,7 @@ local function MakeNewBar(window, o)
 end
 
 local function MakeNewIcon(window, o)
--- pass in anything to override these defaults:
+	-- pass in anything to override these defaults:
 	o.width			= o.width		or options.text_height.value + 3
 	o.height		= o.height		or options.text_height.value + 3
 
@@ -283,16 +288,17 @@ local function TryCreateMarkerWindow(teamID)
 		end
 	end
 
+	--abort if no non-spec players on team
 	if #playerList == 0 then
 		return nil
 	end
 
 	local text_height = options.text_height.value
 
+	--note we don't add to screen yet, we're just creating the detached for now.
 	local window = Chili.Window:New{
 		color = {1,1,1,0},
 		--borderColor = {1,1,1,0},
-		--parent = Chili.Screen0, -- don't add to screen, use the add-to-screen functionality provided by fade-in.
 		dockable = false,
 		name="PlayerCentroid" .. teamID,
 		padding = {5,5,5,5},
@@ -306,7 +312,7 @@ local function TryCreateMarkerWindow(teamID)
 		draggable = false,
 		savespace = false
 	}
-	window.borderColor[4] = 0
+	window.borderColor[4] = 0 --transparent
 
 	window.pcm_teamID = teamID
 	--0 is fully faded, 1 is opaque.
@@ -320,7 +326,6 @@ local function TryCreateMarkerWindow(teamID)
 	-- a team (which is a single "player" in Spring with multiple co-op humans
 	-- controlling it) so can have multiple human players so we're going to
 	-- write one row in the marker per-player
-
 	for i = 1, #playerList do
 		local currentX = 0
 		local currentY = (i-1) * text_height
@@ -361,6 +366,7 @@ local function TryCreateMarkerWindow(teamID)
 					currentX = currentX + width_icon_clan
 				end
 		    end
+			-- note, creating the storage bars is handled UpdatePlayerTeamResourceStats
 		else
 			playerName = "noname"
 		end
@@ -374,10 +380,6 @@ local function TryCreateMarkerWindow(teamID)
 			textColor = teamcolor,
 		})
 	end
-
-	-- put the shared storage bars *below* the list of player within the shared-comm-team
-	local currentY = #playerList * text_height
-
 	return window
 end
 
@@ -386,43 +388,56 @@ local function IsNan(num)
 	return num ~= num
 end
 
+-- High-frequency window updating for nice smooth movement. Doesn't do the
+-- centroid calculations, but uses a PID controller to give the marker window
+-- nice springy movement.
 local function UpdateWindowPosition(window, dt, framesPerSecond)
-	--show marker if it's been hidden and shouldshow is true
-	if window.pcm_shouldShow and not window:IsDescendantOf(screen0) then
-		screen0:AddChild(window)
-
+	--show marker if it's been hidden
+	if window.pcm_shouldShow and (window.pcm_state == nil or window.pcm_state == windowStateEnum.Hidden) then --hidden or nil
 		-- initialize all values
+		window.pcm_state = windowStateEnum.New
 		window.pcm_opacity = 0
-		window.pcm_opacity_transition = 1
+		window.pcm_opacity_transition = 0
 		window.pcm_velX, window.pcm_velY, window.pcm_velZ = 0,0,0
 		window.pcm_integralX, window.pcm_integralY, window.pcm_integralZ = 0,0,0
 
 		window.pcm_posX, window.pcm_posY, window.pcm_posZ =
 			window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ
+	elseif window.pcm_state == windowStateEnum.Ready and not window:IsDescendantOf(screen0) then
+		screen0:AddChild(window)
+		window.pcm_opacity_transition = 1
 	end
 
 	--hide window shouldshow is false
-	if not window.pcm_shouldShow and window.pcm_opacity == 1 then
+	if not window.pcm_shouldShow and window.pcm_opacity > 0 then
 		window.pcm_opacity_transition = -1
 	end
 
-	-- we don't want to apply acceleration once window is fading
+	-- we only want to apply acceleration if the window is supposed to be
+	-- visible because sometimes it's fading because destination is too far, and
+	-- then it whips across the screen.
 	if window.pcm_shouldShow then
 		-- PID controller logic here
 		local pidP, pidI, pidD = options.pidP.value, options.pidI.value, options.pidD.value
 
-		local projectedX, projectedY, projectedZ = AddScalarMultipliedVec3(intervalTimer * framesPerSecond,
+		local projectedX, projectedY, projectedZ = AddVec3(
 			window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ,
-			window.pcm_centroidVelX, window.pcm_centroidVelY, window.pcm_centroidVelZ
+			ScalarMultVec3(intervalTimer * framesPerSecond,
+				window.pcm_centroidVelX, window.pcm_centroidVelY, window.pcm_centroidVelZ
+			)
 		)
 
 		local deltaX = projectedX - window.pcm_posX
 		local deltaY = projectedY - window.pcm_posY
 		local deltaZ = projectedZ - window.pcm_posZ
+		local distance = Distance3D(deltaX, deltaY, deltaZ, 0, 0, 0)
 
 		-- avoid large jumps and just fade-transition.
-		if abs(deltaX) + abs(deltaY) + abs(deltaZ) > markerWindowJumpLimit then
+		if distance > markerWindowJumpLimit then
 			window.pcm_shouldShow = false
+		end
+		if distance < 20 and window.pcm_state == windowStateEnum.Resolving then
+			window.pcm_state = windowStateEnum.Ready
 		end
 
 		window.pcm_integralX, window.pcm_integralY, window.pcm_integralZ = AddVec3(
@@ -448,6 +463,12 @@ local function UpdateWindowPosition(window, dt, framesPerSecond)
 
 	-- apply positional update
 	local sx, sy, sz = spWorldToScreenCoords(window.pcm_posX , window.pcm_posY, window.pcm_posZ)
+	local mx, my = spGetMouseState()
+	local distance = Distance2D(sx, sy + options.vertical_offset.value, mx, my)
+	-- get out of the way of the mouse.
+	if(distance < options.mouseoverHideDistance.value) then
+		window.pcm_shouldShow = false
+	end
 
 	-- check if it's far-out-of-bounds, if so remove window immediately - can re-fade-it-in after.
 	local winPosX = sx - window.width/2
@@ -481,7 +502,7 @@ local function CleanStorage(storage)
 	return storage
 end
 
-local function GetPlayerTeamStats(teamID)
+local function GetPlayerTeamResourceStats(teamID)
 	local eCurrent, eStorage, ePull, eIncome, eExpe, eShar, eSent, eReci = spGetTeamResources(teamID, "energy")
 	local mCurrent, mStorage, mPull, mIncome, mExpe, mShar, mSent, mReci = spGetTeamResources(teamID, "metal")
 
@@ -501,9 +522,9 @@ local function GetPlayerTeamStats(teamID)
 	return mCurrent, mStorage, eCurrent, eStorage
 end
 
-local function UpdatePlayerTeamStats(window)
+local function UpdatePlayerTeamResourceStats(window)
 	local teamID = window.pcm_teamID
-	local mCurrent, mStorage, eCurrent, eStorage = GetPlayerTeamStats(teamID)
+	local mCurrent, mStorage, eCurrent, eStorage = GetPlayerTeamResourceStats(teamID)
 	local text_height = options.text_height.value
 
 	--either resource bar is missing, lazy-create if possible
@@ -519,7 +540,7 @@ local function UpdatePlayerTeamStats(window)
 			window.pcm_m_bar = MakeNewBar(window, {x=0, y=currentY+4, width=resourceBarWidth,color = {.7,.75,.9,1},value = 1,})
 		end
 		if eStorage ~= nil and not window.pcm_e_bar then
-			window.pcm_e_bar = MakeNewBar(window, {x=resourceBarWidth + 2, y=currentY+4, width=resourceBarWidth,color = {1,1,0,1},value = 1,}) 
+			window.pcm_e_bar = MakeNewBar(window, {x=resourceBarWidth + 2, y=currentY+4, width=resourceBarWidth,color = {1,1,0,1},value = 1,})
 		end
 	end
 
@@ -527,8 +548,8 @@ local function UpdatePlayerTeamStats(window)
 	if window.pcm_e_bar then window.pcm_e_bar:SetValue(eCurrent/eStorage) end
 end
 
+-- apply current opacity-level to all widgets within the window
 local function ApplyCurrentOpacity(window)
-	-- apply current opacity-level to all widgets
 	local backgroundOpacity = options.backgroundOpacity.value
 	local newBackgroundOpacity = backgroundOpacity * window.pcm_opacity
 
@@ -562,6 +583,7 @@ local function ApplyCurrentOpacity(window)
 	window:Invalidate()
 end
 
+-- calculate the unit's weight based on overcomplicated logic
 local function GetUnitWeight(unitID, ux, uy, uz)
 	local unitDefID = spGetUnitDefID(unitID)
 	local health, maxHealth, paralyzeDamage, captureProgress, buildProgress = spGetUnitHealth(unitID)
@@ -602,11 +624,15 @@ local function GetUnitWeight(unitID, ux, uy, uz)
 	return unitWeight
 end
 
-local function CalculateCentroid(window, teamID)
+-- Calculate centroid position and apply to window
+-- Create window if it doesn't exist already.
+-- Note that it's not a true centroid because we prefer units
+-- near the previous centroid location, which makes units "sticky"
+local function CalculatePositionAndApplyToWindow(window, teamID)
 	local teamUnits = spGetTeamUnits(teamID)
 	local sumPosX, sumPosY, sumPosZ = 0,0,0
+	local sumVelX, sumVelY, sumVelZ = 0,0,0
 	local totalWeight = 0
-	local unitWeightsCache = {}
 
 	-- first find the main centroid
 	for j=1,#teamUnits do
@@ -614,35 +640,34 @@ local function CalculateCentroid(window, teamID)
 		if spIsUnitInView(unitID) then
 			local ux, uy, uz = spGetUnitViewPosition(unitID)
 			local unitWeight = GetUnitWeight(unitID, ux, uy, uz)
-			unitWeightsCache[unitID] = unitWeight
+
+			local vx, vy, vz = spGetUnitVelocity(unitID)
+
+			-- this part effectively makes units "sticky" to the marker units
+			-- close to the marker are weighted Higher this does create a bit of
+			-- janky jump in the marker as it's appearing though, the weights
+			-- shift wildly
+			if window and (window.pcm_state > windowStateEnum.New) then --resolving or ready
+				-- distances in kilo-elmos so the weights don't go deep into
+				-- scientific notation when applied to weights
+				local minDistance = 2
+				local distance = (Distance3D(
+					ux, uy, uz, window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ
+				) + minDistance) / 1000
+				unitWeight = unitWeight / (distance * distance)
+			end
 
 			--sum up for averages
-			sumPosX, sumPosY, sumPosZ = AddScalarMultipliedVec3(unitWeight, sumPosX, sumPosY, sumPosZ, ux, uy, uz)
+			sumPosX, sumPosY, sumPosZ = AddVec3(
+				sumPosX, sumPosY, sumPosZ,
+				ScalarMultVec3(unitWeight, ux, uy, uz)
+			)
+			sumVelX, sumVelY, sumVelZ = AddVec3(
+				sumVelX, sumVelY, sumVelZ,
+				ScalarMultVec3(unitWeight, vx, vy, vz)
+			)
 			totalWeight = totalWeight + unitWeight
 		end
-	end
-
-	-- now we have total weight and weighted sum, calculate weighted averages
-	local centroidPosX, centroidPosY, centroidPosZ =
-		ScalarMultiplyVec3(1/totalWeight, sumPosX, sumPosY, sumPosZ)
-
-	-- now, repeat but weigh to the cubic power for proximity to the true centroid
-	-- this will help anchor the marker to units.
-	-- This time we have the old weights cached, so we don't have to recalc
-	sumPosX, sumPosY, sumPosZ = 0,0,0
-	local sumVelX, sumVelY, sumVelZ = 0,0,0
-	totalWeight = 0
-	for unitID, unitWeight in pairs(unitWeightsCache) do
-		local ux, uy, uz = spGetUnitViewPosition(unitID)
-		local vx, vy, vz = spGetUnitVelocity(unitID)
-
-		local distance = Distance3D(ux, uy, uz, centroidPosX, centroidPosY, centroidPosZ)
-		unitWeight = unitWeight * 1000000.0 / (distance * distance * distance + 1) -- the further the lower, add 1 to prevent /0
-
-		--sum up for averages
-		sumPosX, sumPosY, sumPosZ = AddScalarMultipliedVec3(unitWeight, sumPosX, sumPosY, sumPosZ, ux, uy, uz)
-		sumVelX, sumVelY, sumVelZ = AddScalarMultipliedVec3(unitWeight, sumVelX, sumVelY, sumVelZ, vx, vy, vz)
-		totalWeight = totalWeight + unitWeight
 	end
 
 	if totalWeight > 0 then --want to avoid div/0 errors
@@ -650,13 +675,18 @@ local function CalculateCentroid(window, teamID)
 			window = TryCreateMarkerWindow(teamID) --can fail under some circumstances
 			markerWindows[teamID] = window
 		end
-		
+
 		if window then
 			-- now we have total weight and weighted sum, calculate weighted averages
 			window.pcm_centroidPosX, window.pcm_centroidPosY, window.pcm_centroidPosZ =
-				ScalarMultiplyVec3(1/totalWeight, sumPosX, sumPosY, sumPosZ)
+				ScalarMultVec3(1/totalWeight, sumPosX, sumPosY, sumPosZ)
 			window.pcm_centroidVelX, window.pcm_centroidVelY, window.pcm_centroidVelZ =
-				ScalarMultiplyVec3(1/totalWeight, sumVelX, sumVelY, sumVelZ)
+				ScalarMultVec3(1/totalWeight, sumVelX, sumVelY, sumVelZ)
+
+			if window.pcm_state == windowStateEnum.New then
+				--don't show the window yet, but the movement calculations are in normal motion
+				window.pcm_state = windowStateEnum.Resolving
+			end
 		end
 	end
 
@@ -690,11 +720,11 @@ function widget:Update(dt)
 			local window = markerWindows[teamID]
 			-- unit stuff begins here
 			if isInterval then
-				CalculateCentroid(window, teamID)
+				CalculatePositionAndApplyToWindow(window, teamID)
 
 				-- update m/e bars
 				if window then
-					UpdatePlayerTeamStats(window)
+					UpdatePlayerTeamResourceStats(window)
 					-- This is redundant but sometimes marker windows get
 					-- "stuck" half-faded. So in our slow-interval we will just
 					-- reassert their opacity
@@ -716,10 +746,11 @@ function widget:Update(dt)
 					if window.pcm_opacity >= 1 then
 						window.pcm_opacity = 1
 						window.pcm_opacity_transition = 0
-					elseif window.pcm_opacity <= 0 then
+					elseif window.pcm_opacity <= 0 and window.pcm_opacity_transition == -1 then
 						window.pcm_opacity = 0
 						screen0:RemoveChild(window)
 						window.pcm_opacity_transition = 0
+						window.pcm_state = windowStateEnum.Hidden
 					end
 					ApplyCurrentOpacity(window)
 				end
