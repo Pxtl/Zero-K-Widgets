@@ -1,0 +1,15 @@
+{
+    //in vscode, ctrl-shift-b copies widgets to ZK widget folder.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Install",
+            "type": "shell",
+            "command": ".\\Install-Widgets.ps1",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
